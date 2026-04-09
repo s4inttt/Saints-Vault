@@ -21,6 +21,7 @@ from utils.loader import load_template, compute_merge_preview, merge_template
 from utils.confirmation import ConfirmView
 
 NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_-]{1,32}$")
+MENTION_RE = re.compile(r"<#(\d+)>")
 
 
 class TemplateCog(commands.Cog):
@@ -121,13 +122,21 @@ class TemplateCog(commands.Cog):
             return
 
         template_data = TemplateData.from_json(record["data"])
-        protected_names = set()
+        protected_set: set[str | int] = set()
         if protected:
-            protected_names = {n.strip() for n in protected.split(",") if n.strip()}
+            for token in protected.split(","):
+                token = token.strip()
+                if not token:
+                    continue
+                m = MENTION_RE.fullmatch(token)
+                if m:
+                    protected_set.add(int(m.group(1)))
+                else:
+                    protected_set.add(token)
 
         if mode == "merge":
             await self._do_merge_load(
-                interaction, name, template_data, protected_names, delete_extras
+                interaction, name, template_data, protected_set, delete_extras
             )
         else:
             await self._do_wipe_load(interaction, name, template_data)
@@ -137,16 +146,16 @@ class TemplateCog(commands.Cog):
         interaction: discord.Interaction,
         name: str,
         template_data: TemplateData,
-        protected_names: set[str],
+        protected_set: set[str | int],
         delete_extras: bool,
     ) -> None:
         """Merge mode: preview diff, confirm, then smart-sync."""
         preview = compute_merge_preview(
-            interaction.guild, template_data, protected_names, delete_extras
+            interaction.guild, template_data, protected_set, delete_extras
         )
 
         embed = self._build_preview_embed(
-            preview, name, interaction.guild.name, delete_extras, protected_names
+            preview, name, interaction.guild.name, delete_extras, protected_set
         )
 
         if not preview.has_changes:
@@ -175,7 +184,7 @@ class TemplateCog(commands.Cog):
         stats = await merge_template(
             guild=interaction.guild,
             template=template_data,
-            protected_names=protected_names,
+            protected=protected_set,
             delete_extras=delete_extras,
             progress=progress,
         )
@@ -313,7 +322,7 @@ class TemplateCog(commands.Cog):
         template_name: str,
         guild_name: str,
         delete_extras: bool,
-        protected_names: set[str],
+        protected_set: set[str | int],
     ) -> discord.Embed:
         """Build a Discord embed summarizing the merge preview."""
         embed = discord.Embed(
@@ -367,8 +376,9 @@ class TemplateCog(commands.Cog):
         flags = []
         if delete_extras:
             flags.append("delete-extras ON")
-        if protected_names:
-            flags.append(f"protected: {', '.join(sorted(protected_names))}")
+        if protected_set:
+            labels = [f"<#{p}>" if isinstance(p, int) else p for p in protected_set]
+            flags.append(f"protected: {', '.join(sorted(labels))}")
         if flags:
             embed.set_footer(text=" | ".join(flags))
 

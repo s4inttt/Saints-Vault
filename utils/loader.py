@@ -326,10 +326,15 @@ def _build_channel_map(
     return result
 
 
+def _is_protected(name: str, obj_id: Optional[int], protected: set) -> bool:
+    """Check whether an item is protected by name or by channel/category ID."""
+    return name in protected or (obj_id is not None and obj_id in protected)
+
+
 def compute_merge_preview(
     guild: discord.Guild,
     template: TemplateData,
-    protected_names: set[str],
+    protected: set[str | int],
     delete_extras: bool,
 ) -> MergePreview:
     """Diff the guild against a template and return what a merge would do."""
@@ -369,7 +374,7 @@ def compute_merge_preview(
 
     if delete_extras:
         for name in existing_cats:
-            if name not in template_cat_names and name not in protected_names:
+            if name not in template_cat_names and not _is_protected(name, existing_cats[name].id, protected):
                 preview.categories_delete.append(name)
 
     # ── Channels ──
@@ -380,11 +385,12 @@ def compute_merge_preview(
     for cd in template.categories:
         for chd in cd.channels:
             key = (cd.name, chd.name)
-            if chd.name in protected_names:
-                if key in existing_channels:
+            existing_ch = existing_channels.get(key)
+            if _is_protected(chd.name, existing_ch.id if existing_ch else None, protected):
+                if existing_ch is not None:
                     preview.channels_protected.append(f"{cd.name}/{chd.name}")
                 accounted.add(key)
-            elif key in existing_channels:
+            elif existing_ch is not None:
                 preview.channels_edit.append(f"{cd.name}/{chd.name}")
                 accounted.add(key)
             else:
@@ -393,11 +399,12 @@ def compute_merge_preview(
     # Uncategorized channels
     for chd in template.channels:
         key = (None, chd.name)
-        if chd.name in protected_names:
-            if key in existing_channels:
+        existing_ch = existing_channels.get(key)
+        if _is_protected(chd.name, existing_ch.id if existing_ch else None, protected):
+            if existing_ch is not None:
                 preview.channels_protected.append(chd.name)
             accounted.add(key)
-        elif key in existing_channels:
+        elif existing_ch is not None:
             preview.channels_edit.append(chd.name)
             accounted.add(key)
         else:
@@ -405,7 +412,7 @@ def compute_merge_preview(
 
     if delete_extras:
         for key, ch in existing_channels.items():
-            if key not in accounted and ch.name not in protected_names:
+            if key not in accounted and not _is_protected(ch.name, ch.id, protected):
                 cat_name, ch_name = key
                 label = f"{cat_name}/{ch_name}" if cat_name else ch_name
                 preview.channels_delete.append(label)
@@ -439,7 +446,7 @@ async def _edit_channel(
 async def merge_template(
     guild: discord.Guild,
     template: TemplateData,
-    protected_names: set[str],
+    protected: set[str | int],
     delete_extras: bool,
     progress: Callable[[str], Awaitable[None]],
 ) -> dict:
@@ -597,7 +604,7 @@ async def merge_template(
     # Delete extra categories
     if delete_extras:
         for name, cat in existing_cats.items():
-            if name not in template_cat_names and name not in protected_names:
+            if name not in template_cat_names and not _is_protected(name, cat.id, protected):
                 try:
                     await cat.delete(reason="Template merge: removing extra category")
                     stats["categories_deleted"] += 1
@@ -620,11 +627,12 @@ async def merge_template(
         for chd in sorted(cd.channels, key=lambda c: c.position):
             key = (cd.name, chd.name)
             overwrites = _resolve_overwrites(chd.overwrites, role_map, guild)
+            existing_ch = existing_channels.get(key)
 
-            if chd.name in protected_names:
-                if key in existing_channels:
+            if _is_protected(chd.name, existing_ch.id if existing_ch else None, protected):
+                if existing_ch is not None:
                     protected_overwrite_queue.append(
-                        (existing_channels[key], overwrites)
+                        (existing_ch, overwrites)
                     )
                     stats["channels_protected"] += 1
                 accounted.add(key)
@@ -650,11 +658,12 @@ async def merge_template(
     for chd in sorted(template.channels, key=lambda c: c.position):
         key = (None, chd.name)
         overwrites = _resolve_overwrites(chd.overwrites, role_map, guild)
+        existing_ch = existing_channels.get(key)
 
-        if chd.name in protected_names:
-            if key in existing_channels:
+        if _is_protected(chd.name, existing_ch.id if existing_ch else None, protected):
+            if existing_ch is not None:
                 protected_overwrite_queue.append(
-                    (existing_channels[key], overwrites)
+                    (existing_ch, overwrites)
                 )
                 stats["channels_protected"] += 1
             accounted.add(key)
@@ -679,7 +688,7 @@ async def merge_template(
     # Delete extra channels
     if delete_extras:
         for key, ch in existing_channels.items():
-            if key not in accounted and ch.name not in protected_names:
+            if key not in accounted and not _is_protected(ch.name, ch.id, protected):
                 try:
                     await ch.delete(reason="Template merge: removing extra channel")
                     stats["channels_deleted"] += 1
