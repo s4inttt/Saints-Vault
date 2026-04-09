@@ -17,7 +17,7 @@ from discord.ext import commands
 import database as db
 from models import TemplateData
 from utils.serializer import serialize_guild
-from utils.loader import load_template
+from utils.loader import load_template, compute_merge_preview, merge_template
 from utils.confirmation import ConfirmView
 
 NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_-]{1,32}$")
@@ -92,10 +92,26 @@ class TemplateCog(commands.Cog):
 
     # ── /template load ─────────────────────────────────────────
 
-    @template_group.command(name="load", description="Load a template onto this server (destructive!)")
-    @app_commands.describe(name="Template name to load")
+    @template_group.command(name="load", description="Load a template onto this server")
+    @app_commands.describe(
+        name="Template name to load",
+        mode="Load mode: merge (smart sync) or wipe (delete all & rebuild)",
+        protected="Comma-separated channel names to protect (merge mode, perms still sync)",
+        delete_extras="Delete server items not in the template (merge mode)",
+    )
+    @app_commands.choices(mode=[
+        app_commands.Choice(name="Merge (smart sync)", value="merge"),
+        app_commands.Choice(name="Wipe & Rebuild", value="wipe"),
+    ])
     @app_commands.autocomplete(name=template_name_autocomplete)
-    async def template_load(self, interaction: discord.Interaction, name: str):
+    async def template_load(
+        self,
+        interaction: discord.Interaction,
+        name: str,
+        mode: str = "merge",
+        protected: str = None,
+        delete_extras: bool = False,
+    ):
         # Fetch template
         record = await db.get_template(interaction.user.id, name)
         if not record:
@@ -105,10 +121,122 @@ class TemplateCog(commands.Cog):
             return
 
         template_data = TemplateData.from_json(record["data"])
+        protected_names = set()
+        if protected:
+            protected_names = {n.strip() for n in protected.split(",") if n.strip()}
 
-        # Show confirmation
+        if mode == "merge":
+            await self._do_merge_load(
+                interaction, name, template_data, protected_names, delete_extras
+            )
+        else:
+            await self._do_wipe_load(interaction, name, template_data)
+
+    async def _do_merge_load(
+        self,
+        interaction: discord.Interaction,
+        name: str,
+        template_data: TemplateData,
+        protected_names: set[str],
+        delete_extras: bool,
+    ) -> None:
+        """Merge mode: preview diff, confirm, then smart-sync."""
+        preview = compute_merge_preview(
+            interaction.guild, template_data, protected_names, delete_extras
+        )
+
+        embed = self._build_preview_embed(
+            preview, name, interaction.guild.name, delete_extras, protected_names
+        )
+
+        if not preview.has_changes:
+            embed.description += "\n\n**Server already matches template. Nothing to do.**"
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            return
+
+        view = ConfirmView(author_id=interaction.user.id)
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+        await view.wait()
+
+        if not view.value:
+            await interaction.followup.send("Merge cancelled.", ephemeral=True)
+            return
+
+        progress_msg = await interaction.followup.send(
+            "Starting merge...", ephemeral=True
+        )
+
+        async def progress(msg: str):
+            try:
+                await progress_msg.edit(content=msg)
+            except Exception:
+                pass
+
+        stats = await merge_template(
+            guild=interaction.guild,
+            template=template_data,
+            protected_names=protected_names,
+            delete_extras=delete_extras,
+            progress=progress,
+        )
+
+        result_embed = discord.Embed(
+            title="Merge Complete",
+            description=f"Template **`{name}`** has been merged.",
+            color=discord.Color.green(),
+            timestamp=datetime.utcnow(),
+        )
+        result_embed.add_field(
+            name="Roles",
+            value=(
+                f"Created: {stats['roles_created']}\n"
+                f"Edited: {stats['roles_edited']}\n"
+                f"Deleted: {stats['roles_deleted']}\n"
+                f"Failed: {stats['roles_failed']}"
+            ),
+            inline=True,
+        )
+        result_embed.add_field(
+            name="Channels",
+            value=(
+                f"Created: {stats['channels_created']}\n"
+                f"Edited: {stats['channels_edited']}\n"
+                f"Protected: {stats['channels_protected']}\n"
+                f"Deleted: {stats['channels_deleted']}\n"
+                f"Failed: {stats['channels_failed']}"
+            ),
+            inline=True,
+        )
+        result_embed.add_field(
+            name="Categories",
+            value=(
+                f"Created: {stats['categories_created']}\n"
+                f"Edited: {stats['categories_edited']}\n"
+                f"Deleted: {stats['categories_deleted']}\n"
+                f"Failed: {stats['categories_failed']}"
+            ),
+            inline=True,
+        )
+
+        try:
+            await progress_msg.edit(content=None, embed=result_embed)
+        except Exception:
+            for channel in interaction.guild.text_channels:
+                try:
+                    await channel.send(embed=result_embed)
+                    break
+                except Exception:
+                    continue
+
+    async def _do_wipe_load(
+        self,
+        interaction: discord.Interaction,
+        name: str,
+        template_data: TemplateData,
+    ) -> None:
+        """Wipe mode: original destructive load behaviour."""
         embed = discord.Embed(
-            title="⚠️ Destructive Operation",
+            title="Destructive Operation",
             description=(
                 f"Loading template **`{name}`** will:\n"
                 f"- **Delete ALL** existing channels\n"
@@ -124,19 +252,15 @@ class TemplateCog(commands.Cog):
 
         view = ConfirmView(author_id=interaction.user.id)
         await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
-
         await view.wait()
 
         if not view.value:
             await interaction.followup.send("Load cancelled.", ephemeral=True)
             return
 
-        # Defer for long operation - create a visible progress channel
         progress_msg = await interaction.followup.send(
             "Starting template load...", ephemeral=True
         )
-
-        # Use the current channel as keep_channel for progress updates
         keep_channel = interaction.channel
 
         async def progress(msg: str):
@@ -145,7 +269,6 @@ class TemplateCog(commands.Cog):
             except Exception:
                 pass
 
-        # Run the load
         stats = await load_template(
             guild=interaction.guild,
             template=template_data,
@@ -153,7 +276,6 @@ class TemplateCog(commands.Cog):
             progress=progress,
         )
 
-        # Build results embed
         result_embed = discord.Embed(
             title="Template Loaded",
             description=f"Template **`{name}`** has been applied.",
@@ -175,9 +297,7 @@ class TemplateCog(commands.Cog):
             inline=True,
         )
 
-        # Try to send in a new text channel since the old one may be deleted
         try:
-            # Find any text channel to send the result
             for channel in interaction.guild.text_channels:
                 try:
                     await channel.send(embed=result_embed)
@@ -186,6 +306,73 @@ class TemplateCog(commands.Cog):
                     continue
         except Exception:
             pass
+
+    @staticmethod
+    def _build_preview_embed(
+        preview,
+        template_name: str,
+        guild_name: str,
+        delete_extras: bool,
+        protected_names: set[str],
+    ) -> discord.Embed:
+        """Build a Discord embed summarizing the merge preview."""
+        embed = discord.Embed(
+            title="Merge Preview",
+            description=f"Template **`{template_name}`** → **{guild_name}**",
+            color=discord.Color.gold(),
+        )
+
+        # Roles
+        role_lines = []
+        if preview.roles_create:
+            role_lines.append(f"**+{len(preview.roles_create)}** create: {', '.join(preview.roles_create[:10])}")
+        if preview.roles_edit:
+            role_lines.append(f"**~{len(preview.roles_edit)}** edit: {', '.join(preview.roles_edit[:10])}")
+        if preview.roles_delete:
+            role_lines.append(f"**-{len(preview.roles_delete)}** delete: {', '.join(preview.roles_delete[:10])}")
+        embed.add_field(
+            name="Roles",
+            value="\n".join(role_lines) if role_lines else "No changes",
+            inline=False,
+        )
+
+        # Categories
+        cat_lines = []
+        if preview.categories_create:
+            cat_lines.append(f"**+{len(preview.categories_create)}** create: {', '.join(preview.categories_create[:10])}")
+        if preview.categories_edit:
+            cat_lines.append(f"**~{len(preview.categories_edit)}** sync: {', '.join(preview.categories_edit[:10])}")
+        if preview.categories_delete:
+            cat_lines.append(f"**-{len(preview.categories_delete)}** delete: {', '.join(preview.categories_delete[:10])}")
+        if cat_lines:
+            embed.add_field(name="Categories", value="\n".join(cat_lines), inline=False)
+
+        # Channels
+        ch_lines = []
+        if preview.channels_create:
+            ch_lines.append(f"**+{len(preview.channels_create)}** create: {', '.join(preview.channels_create[:8])}")
+        if preview.channels_edit:
+            ch_lines.append(f"**~{len(preview.channels_edit)}** edit: {', '.join(preview.channels_edit[:8])}")
+        if preview.channels_protected:
+            ch_lines.append(f"**{len(preview.channels_protected)}** protected (perms only): {', '.join(preview.channels_protected[:8])}")
+        if preview.channels_delete:
+            ch_lines.append(f"**-{len(preview.channels_delete)}** delete: {', '.join(preview.channels_delete[:8])}")
+        embed.add_field(
+            name="Channels",
+            value="\n".join(ch_lines) if ch_lines else "No changes",
+            inline=False,
+        )
+
+        # Footer with settings summary
+        flags = []
+        if delete_extras:
+            flags.append("delete-extras ON")
+        if protected_names:
+            flags.append(f"protected: {', '.join(sorted(protected_names))}")
+        if flags:
+            embed.set_footer(text=" | ".join(flags))
+
+        return embed
 
     # ── /template list ─────────────────────────────────────────
 
