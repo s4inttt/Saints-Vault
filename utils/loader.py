@@ -59,6 +59,7 @@ async def load_template(
     }
 
     # ── Phase 1: Delete existing channels ──────────────────────
+    print("[WIPE] Phase 1/5 — Deleting existing channels...")
     await progress("**Phase 1/5** — Deleting existing channels...")
 
     for channel in list(guild.channels):
@@ -72,6 +73,7 @@ async def load_template(
             pass
 
     # ── Phase 2: Delete existing roles ─────────────────────────
+    print("[WIPE] Phase 2/5 — Deleting existing roles...")
     await progress("**Phase 2/5** — Deleting existing roles...")
 
     bot_member = guild.me
@@ -90,6 +92,7 @@ async def load_template(
             pass
 
     # ── Phase 3: Create roles ──────────────────────────────────
+    print("[WIPE] Phase 3/5 — Creating roles...")
     await progress("**Phase 3/5** — Creating roles...")
 
     role_map: dict[str, discord.Role] = {"everyone": guild.default_role}
@@ -108,7 +111,8 @@ async def load_template(
             role_map[role_data.name] = new_role
             stats["roles_created"] += 1
             await asyncio.sleep(ROLE_DELAY)
-        except Exception:
+        except Exception as e:
+            print(f"[WIPE] Failed to create role '{role_data.name}': {e}")
             stats["roles_failed"] += 1
 
     # Batch reposition roles
@@ -124,6 +128,7 @@ async def load_template(
                 pass
 
     # ── Phase 4: Create categories + channels ──────────────────
+    print("[WIPE] Phase 4/5 — Creating categories + channels...")
     await progress("**Phase 4/5** — Creating channels...")
 
     # Create categories first
@@ -145,10 +150,12 @@ async def load_template(
                     await _create_channel(guild, ch_data, role_map, category)
                     stats["channels_created"] += 1
                     await asyncio.sleep(CHANNEL_DELAY)
-                except Exception:
+                except Exception as e:
+                    print(f"[WIPE] Failed to create channel '{ch_data.name}' in category '{cat_data.name}': {e}")
                     stats["channels_failed"] += 1
 
-        except Exception:
+        except Exception as e:
+            print(f"[WIPE] Failed to create category '{cat_data.name}': {e}")
             stats["categories_failed"] += 1
 
     # Create uncategorized channels
@@ -157,10 +164,12 @@ async def load_template(
             await _create_channel(guild, ch_data, role_map, category=None)
             stats["channels_created"] += 1
             await asyncio.sleep(CHANNEL_DELAY)
-        except Exception:
+        except Exception as e:
+            print(f"[WIPE] Failed to create uncategorized channel '{ch_data.name}': {e}")
             stats["channels_failed"] += 1
 
     # ── Phase 5: Apply server settings ─────────────────────────
+    print("[WIPE] Phase 5/5 — Applying server settings...")
     await progress("**Phase 5/5** — Applying server settings...")
 
     try:
@@ -484,6 +493,7 @@ async def merge_template(
     bot_member = guild.me
 
     # ── Phase 1: Sync roles ───────────────────────────────────────
+    print("[MERGE] Phase 1/6 — Syncing roles...")
     await progress("**Phase 1/6** — Syncing roles...")
 
     existing_roles = {
@@ -507,7 +517,8 @@ async def merge_template(
                         reason="Template merge: syncing role",
                     )
                     stats["roles_edited"] += 1
-                except Exception:
+                except Exception as e:
+                    print(f"[MERGE] Failed to edit role '{rd.name}': {e}")
                     stats["roles_failed"] += 1
                 await asyncio.sleep(ROLE_DELAY)
         else:
@@ -522,7 +533,8 @@ async def merge_template(
                 )
                 role_map[rd.name] = new_role
                 stats["roles_created"] += 1
-            except Exception:
+            except Exception as e:
+                print(f"[MERGE] Failed to create role '{rd.name}': {e}")
                 stats["roles_failed"] += 1
             await asyncio.sleep(ROLE_DELAY)
 
@@ -532,6 +544,7 @@ async def merge_template(
             role_map[name] = role
 
     # ── Phase 2: Reorder roles ────────────────────────────────────
+    print("[MERGE] Phase 2/6 — Reordering roles...")
     await progress("**Phase 2/6** — Reordering roles...")
 
     positions: dict[discord.Role, int] = {}
@@ -554,6 +567,7 @@ async def merge_template(
 
     # ── Phase 3: Delete extra roles ───────────────────────────────
     if delete_extras:
+        print("[MERGE] Phase 3/6 — Deleting extra roles...")
         await progress("**Phase 3/6** — Deleting extra roles...")
         for name, role in existing_roles.items():
             if name not in template_role_names:
@@ -567,6 +581,7 @@ async def merge_template(
                 await asyncio.sleep(ROLE_DELAY)
 
     # ── Phase 4: Sync categories ──────────────────────────────────
+    print("[MERGE] Phase 4/6 — Syncing categories...")
     await progress("**Phase 4/6** — Syncing categories...")
 
     existing_cats = {c.name: c for c in guild.categories}
@@ -585,7 +600,8 @@ async def merge_template(
                     reason="Template merge: syncing category",
                 )
                 stats["categories_edited"] += 1
-            except Exception:
+            except Exception as e:
+                print(f"[MERGE] Failed to edit category '{cd.name}': {e}")
                 stats["categories_failed"] += 1
         else:
             try:
@@ -597,7 +613,8 @@ async def merge_template(
                 )
                 cat_map[cd.name] = cat
                 stats["categories_created"] += 1
-            except Exception:
+            except Exception as e:
+                print(f"[MERGE] Failed to create category '{cd.name}': {e}")
                 stats["categories_failed"] += 1
         await asyncio.sleep(CHANNEL_DELAY)
 
@@ -613,6 +630,7 @@ async def merge_template(
                 await asyncio.sleep(CHANNEL_DELAY)
 
     # ── Phase 5: Sync channels ────────────────────────────────────
+    print("[MERGE] Phase 5/6 — Syncing channels...")
     await progress("**Phase 5/6** — Syncing channels...")
 
     existing_channels = _build_channel_map(guild)
@@ -642,7 +660,8 @@ async def merge_template(
                         existing_channels[key], chd, category, overwrites
                     )
                     stats["channels_edited"] += 1
-                except Exception:
+                except Exception as e:
+                    print(f"[MERGE] Failed to edit channel '{chd.name}' in category '{cd.name}': {e}")
                     stats["channels_failed"] += 1
                 accounted.add(key)
                 await asyncio.sleep(CHANNEL_DELAY)
@@ -650,7 +669,8 @@ async def merge_template(
                 try:
                     await _create_channel(guild, chd, role_map, category)
                     stats["channels_created"] += 1
-                except Exception:
+                except Exception as e:
+                    print(f"[MERGE] Failed to create channel '{chd.name}' in category '{cd.name}': {e}")
                     stats["channels_failed"] += 1
                 await asyncio.sleep(CHANNEL_DELAY)
 
@@ -673,7 +693,8 @@ async def merge_template(
                     existing_channels[key], chd, None, overwrites
                 )
                 stats["channels_edited"] += 1
-            except Exception:
+            except Exception as e:
+                print(f"[MERGE] Failed to edit uncategorized channel '{chd.name}': {e}")
                 stats["channels_failed"] += 1
             accounted.add(key)
             await asyncio.sleep(CHANNEL_DELAY)
@@ -681,7 +702,8 @@ async def merge_template(
             try:
                 await _create_channel(guild, chd, role_map, category=None)
                 stats["channels_created"] += 1
-            except Exception:
+            except Exception as e:
+                print(f"[MERGE] Failed to create uncategorized channel '{chd.name}': {e}")
                 stats["channels_failed"] += 1
             await asyncio.sleep(CHANNEL_DELAY)
 
@@ -698,6 +720,7 @@ async def merge_template(
 
     # ── Phase 6: Sync permissions on protected channels ───────────
     if protected_overwrite_queue:
+        print(f"[MERGE] Phase 6/6 — Syncing permissions on {len(protected_overwrite_queue)} protected channel(s)...")
         await progress("**Phase 6/6** — Syncing protected channel permissions...")
         for ch, overwrites in protected_overwrite_queue:
             try:
@@ -710,6 +733,7 @@ async def merge_template(
             await asyncio.sleep(CHANNEL_DELAY)
 
     # ── Apply server settings ─────────────────────────────────────
+    print(f"[MERGE] Applying server settings (name='{template.guild_name}', icon={'yes' if template.icon else 'no'})...")
     await progress("Applying server settings...")
     try:
         kwargs: dict = {"name": template.guild_name}
